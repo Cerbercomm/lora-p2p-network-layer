@@ -1,0 +1,6 @@
+# Copyright (c) 2024 Semtech Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+build:
+  kconfig: Kconfig
+  cmake: .
