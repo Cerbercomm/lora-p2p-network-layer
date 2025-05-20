@@ -1,0 +1,9 @@
+# ** Network over LBM drivers (loRa PHY) kernel configuration **
+#      Direct network specific
+
+config LBM_P2P_NETWORK_DIRECT
+        bool "Direct P2P Lora network"
+        default y
+        select HAS_LBM_P2P_NETWORK_DRIVER
+        help
+          Each node is able to send to and receive from every other node in the network.

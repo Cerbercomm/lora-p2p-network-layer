@@ -1,0 +1,4 @@
+# ** Network Layer Drivers **
+
+# Drivers specific kernel configuration
+rsource "drivers/Kconfig"

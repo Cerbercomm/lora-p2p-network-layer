@@ -1,0 +1,30 @@
+# ** Network over LBM (Lora Basics Modem) kernel configuration **
+
+# Enable PHY layer
+menuconfig LBM_P2P_NETWORK
+        bool "Network over P2P LBM"
+        select EXPERIMENTAL
+        depends on !LORA
+        help
+          Include support for network over LBM (Lora Basics Modem) PHY layer
+
+if LBM_P2P_NETWORK
+
+# Logging support for namespace
+module = LBM_P2P_NETWORK
+module-str = lbm-p2p-network
+source "subsys/logging/Kconfig.template.log_config"
+
+# We need this enabled to use LoRa WAN stack
+#   specific drivers with met dependencies will select this
+config HAS_LBM_P2P_NETWORK_DRIVER
+        bool
+
+choice
+
+# Configuration specific to direct network
+rsource "direct/Kconfig"
+
+endchoice
+
+endif # LBM_P2P_NETWORK
