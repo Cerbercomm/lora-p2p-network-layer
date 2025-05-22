@@ -2,7 +2,7 @@
 
 # Enable PHY layer
 menuconfig LBM_P2P_NETWORK
-        bool "Network over P2P LBM"
+        bool "Network over Lora (LBM) P2P"
         select EXPERIMENTAL
         depends on !LORA
         help
@@ -21,6 +21,10 @@ config HAS_LBM_P2P_NETWORK_DRIVER
         bool
 
 choice
+        prompt "Network driver"
+        default LBM_P2P_NETWORK_DIRECT
+        help
+          Which Lora P2P network driver to use
 
 # Configuration specific to direct network
 rsource "direct/Kconfig"
