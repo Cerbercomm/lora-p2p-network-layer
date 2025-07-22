@@ -10,3 +10,6 @@ zephyr_include_directories(
 
 # Subdirectories specific to each network driver
 add_subdirectory_ifdef(CONFIG_LBM_P2P_NETWORK_DIRECT ${CMAKE_CURRENT_LIST_DIR}/direct)
+
+# Subdirectory for transport layer
+add_subdirectory_ifdef(CONFIG_LBM_P2P_TRANSPORT_LAYER ${CMAKE_CURRENT_LIST_DIR}/transport)

@@ -15,6 +15,10 @@ module = LBM_P2P_NETWORK
 module-str = lbm-p2p-network
 source "subsys/logging/Kconfig.template.log_config"
 
+module = LBM_P2P_TRANSPORT
+module-str = lbm-p2p-transport
+source "subsys/logging/Kconfig.template.log_config"
+
 # We need this enabled to use LoRa WAN stack
 #   specific drivers with met dependencies will select this
 config HAS_LBM_P2P_NETWORK_DRIVER
@@ -30,5 +34,12 @@ choice
 rsource "direct/Kconfig"
 
 endchoice
+
+config LBM_P2P_TRANSPORT_LAYER
+        bool "Lora P2P transport network layer"
+#        default y
+        depends on HAS_LBM_P2P_NETWORK_DRIVER
+        help
+          Lora P2P transport network layer implementation.
 
 endif # LBM_P2P_NETWORK
