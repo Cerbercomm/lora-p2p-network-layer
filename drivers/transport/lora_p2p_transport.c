@@ -11,7 +11,7 @@
 #include "lora_p2p_transport_layer.h"
 #include "lora_p2p_network_layer.h"
 
-#include "lora_p2p_network_direct.h"
+#include "zephyr/sys/ring_buffer.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -23,165 +23,249 @@ LOG_MODULE_REGISTER(P2PTrans, CONFIG_LBM_P2P_TRANSPORT_LOG_LEVEL);
 
 /* Definitions
 */
-#define LBM_BUFFER_SIZE_MAX 255
+// buffer size depends on LoRa hardware
+#if defined(CONFIG_LORA_BASICS_MODEM_SX126X) || defined(CONFIG_LORA_BASICS_MODEM_SX127X)
+# define LBM_BUFFER_SIZE_MAX 255
+#else
+# error "LoRa Hardware is not defined"
+#endif
+static uint8_t packet_buffer[LBM_BUFFER_SIZE_MAX];
 
 struct lora_p2p_transport_data_t {
-    struct device *network_dev;
+    // ring buffer for IO
+    struct ring_buf rb;
 
-    // buffer for IO
-    uint8_t buffer[LBM_BUFFER_SIZE_MAX];
+    // network layer lora device
+    const struct device *lora_network_dev;
 };
 
+// ** Header **
+// mask for packet type
+#define LBM_TRANSPORT_HEADER_TYPE_MASK        0b111
+
 // an Ack packet
-#define LBM_TRANSPORT_HEADER_TYPE_ACK         0
+#define LBM_TRANSPORT_HEADER_TYPE_ACK         1
 
 // stand alone packet
-#define LBM_TRANSPORT_HEADER_TYPE_STAND_ALONE 1
+#define LBM_TRANSPORT_HEADER_TYPE_STAND_ALONE 2
 
-// a starter or finisher of a multi packet train
-#define LBM_TRANSPORT_HEADER_TYPE_BOUND       2
+// a starter of a multi packet train
+#define LBM_TRANSPORT_HEADER_TYPE_STARTER     3
 
 // a continuation of a multi packet train
-#define LBM_TRANSPORT_HEADER_TYPE_CONTINUE    3
+#define LBM_TRANSPORT_HEADER_TYPE_CONTINUE    4
+
+// a finisher of a multi packet train
+#define LBM_TRANSPORT_HEADER_TYPE_FINISHER    5
 
 // flag that we want reliable transport (we want an Ack for each send)
-#define LBM_TRANSPORT_HEADER_FLAG_RELIABLE    4
+#define LBM_TRANSPORT_HEADER_FLAG_RELIABLE    0b1000
 
 // ** LoRa Network device definition **
-#define LORA_NETWORK_DEVICE DEVICE_GET(LORA_P2P_NETWORK_DIRECT_DRIVER_NAME)
+#define LORA_NETWORK_DEVICE DEVICE_GET(LORA_P2P_NETWORK_DRIVER_NAME)
+
+/* Internal
+*/
+static bool is_ack_packet(struct ring_buf *rb) {
+    uint8_t header;
+
+    // must be just a header
+    if (ring_buf_size_get(rb) != 1) return false;
+
+    // get header
+    ring_buf_get(rb, &header, 1);
+
+    // check type
+    return (header & LBM_TRANSPORT_HEADER_TYPE_MASK) == LBM_TRANSPORT_HEADER_TYPE_ACK;
+}
+
+static void prepare_ack(struct ring_buf *rb) {
+    uint8_t header = LBM_TRANSPORT_HEADER_TYPE_ACK;
+
+    ring_buf_reset(rb);
+    ring_buf_put(rb, &header, 1);
+}
 
 /* Driver init
 */
 static int lora_p2p_transport_init(const struct device *dev) {
     struct lora_p2p_transport_data_t *data = dev->data;
 
-    // initialize inferior network driver
-    data->network_dev = LORA_NETWORK_DEVICE;
+    // assign inferiour network device
+    data->lora_network_dev = device_get_binding(LORA_P2P_NETWORK_DRIVER_NAME);
+
+    // make sure lora device is ready
+    if (!device_is_ready(data->lora_network_dev)) {
+        LOG_ERR("%s Device not ready", data->lora_network_dev->name);
+        return -EINVAL;
+    }
+
+    // initialize ring buffer
+    ring_buf_init(&data->rb, LBM_BUFFER_SIZE_MAX, packet_buffer);
+
+    // ready !
+    LOG_INF("LoRa transport layer ready");
 
     return 0;
 }
 
 /* Driver API
 */
-static struct device * lora_p2p_transport_get_network_device_impl(const struct device *dev) {
+static const struct device * lora_p2p_transport_get_network_device_impl(const struct device *dev) {
     struct lora_p2p_transport_data_t *data = dev->data;
 
-	return data->network_dev;
+	return data->lora_network_dev;
 }
 
-static int lora_p2p_transport_send_impl(const struct device *dev, uint8_t to, struct ring_buf *rb, bool reliable) {
+static int lora_p2p_transport_send_impl(const struct device *dev, uint8_t to, struct ring_buf *input, bool reliable) {
     struct lora_p2p_transport_data_t *data = dev->data;
-    uint8_t packet_size;
+
+    uint8_t *packet;
+    uint32_t packet_size, available_size;
     int retcode;
     struct lora_p2p_network_incoming_t meta;
+    bool first_packet = true;
 
-    // sanity check: all required parameters were set beforehand
-    if (data->network_dev == NULL) return -EINVAL;
-
-    LOG_DBG("Sending %d bytes to %d", 	ring_buf_size_get(rb), to);
-
-    // stand alone packet ?
-    if (lora_p2p_network_get_mtu(data->network_dev) >= (ring_buf_size_get(rb)+1)) {
-        // header: type
-        data->buffer[0] = LBM_TRANSPORT_HEADER_TYPE_STAND_ALONE;
-
-        // header: reliable transport (with Ack for each send)
-        data->buffer[0] |= reliable ? LBM_TRANSPORT_HEADER_FLAG_RELIABLE : 0;
-
-        // content
-        packet_size = ring_buf_get(rb, &data->buffer[1], lora_p2p_network_get_mtu(data->network_dev)-1);
-    
-    // and initializer for a packet train ?
-    } else {
-        // header: type
-        data->buffer[0] = LBM_TRANSPORT_HEADER_TYPE_BOUND;
-
-        // header: reliable transport (with Ack for each send)
-        data->buffer[0] |= reliable ? LBM_TRANSPORT_HEADER_FLAG_RELIABLE : 0;
-
-        // header: packet train content length in bytes
-        data->buffer[1] = ring_buf_size_get(rb) & 0xFF;
-        data->buffer[2] = (ring_buf_size_get(rb) >> 8) & 0xFF;
-
-        // content
-        packet_size = ring_buf_get(rb, &data->buffer[3], lora_p2p_network_get_mtu(data->network_dev)-3);
-    }
+    LOG_DBG("Sending %d bytes packet to %d", ring_buf_size_get(input), to);
 
     do {
-        // send packet
-        retcode = lora_p2p_network_send(data->network_dev, to, data->buffer, packet_size);
-        if (retcode < 0) return retcode;
+        /* Prepare packet
+        */
+        // reset our buffer so we're at the begining of the memory block
+        ring_buf_reset(&data->rb);
 
-        // reliable ?
-        if (reliable) {
-            // wait for Ack
-            retcode = lora_p2p_network_recv(data->network_dev, &meta, &data->buffer[0], LBM_BUFFER_SIZE_MAX);
-            
+        // allocate space for packet
+        available_size = ring_buf_put_claim(&data->rb, &packet, lora_p2p_network_get_mtu(data->lora_network_dev));
+
+        // get content to be sent
+        packet_size = ring_buf_get(input, packet, available_size-1);
+
+        // first packet we send ?
+        if (first_packet) {
+            // header: type
+            packet[packet_size] = lora_p2p_network_get_mtu(data->lora_network_dev) >= (ring_buf_size_get(input)+1+packet_size) ?
+                LBM_TRANSPORT_HEADER_TYPE_STAND_ALONE :
+                LBM_TRANSPORT_HEADER_TYPE_STARTER;
+            first_packet = false;
+        } else {
+            // header: type
+            packet[packet_size] = lora_p2p_network_get_mtu(data->lora_network_dev) >= (ring_buf_size_get(input)+1+packet_size) ?
+                LBM_TRANSPORT_HEADER_TYPE_FINISHER :
+                LBM_TRANSPORT_HEADER_TYPE_CONTINUE;
         }
 
+        // header: reliable transport (with Ack for each send)
+        packet[packet_size] |= reliable ? LBM_TRANSPORT_HEADER_FLAG_RELIABLE : 0;
+
+        // finish claim
+        retcode = ring_buf_put_finish(&data->rb, packet_size+1);
+
+        /* Send packet
+        */
+        retcode = lora_p2p_network_send(data->lora_network_dev, to, &data->rb);
+        if (retcode < 0) return retcode;
+
+        /* Make it reliable if requested
+        */
+        if (reliable) {
+            // reset our buffer just in case
+            ring_buf_reset(&data->rb);
+
+            // wait for Ack
+            retcode = lora_p2p_network_recv(data->lora_network_dev, &meta, &data->rb, K_SECONDS(1));
+            if (retcode < 0) {
+                LOG_ERR("Timeout on Ack");
+                return retcode;
+            }
+
+            // make sure this is an Ack packet
+            if (!is_ack_packet(&data->rb)) {
+                LOG_ERR("lora_p2p_transport_send_impl(): Expected Ack");
+                return -EINVAL;
+            }
+        }
+
+        /* Aftermath
+        */
         // are we done ?
-        if (ring_buf_is_empty(rb)) break;
+        if (ring_buf_is_empty(input)) break;
 
-        // give recipient one millisecond to sort things out
+        // give recipient grace time of 1 millisecond(s) to sort things out before we work on next part
         k_sleep(K_MSEC(1));
-
-        // ** prepare header **
-        // packet type
-        data->buffer[0] = lora_p2p_network_get_mtu(data->network_dev) >= (length - pos) ?
-            LBM_TRANSPORT_HEADER_TYPE_BOUND : LBM_TRANSPORT_HEADER_TYPE_CONTINUE;
-
-        // reliable ? 
-        data->buffer[0] |= reliable ? LBM_TRANSPORT_HEADER_FLAG_RELIABLE : 0;
-
-        // ** content **
-        packet_size = lora_p2p_network_get_mtu(data->network_dev) > (length - pos) ?
-            (length - pos) : lora_p2p_network_get_mtu(data->network_dev);
-        memcpy(&data->buffer[1], &buffer[pos], packet_size);
-        pos += packet_size;
 
     } while (true);
 
-    // return how many bytes we sent
-    return pos;
+    // return success
+    return 0;
 }
 
-static int lora_p2p_transport_recv_impl(const struct device *dev, struct lora_p2p_transport_incoming_t *meta, uint8_t *buffer, uint16_t length) {
+static int lora_p2p_transport_recv_impl(const struct device *dev, struct lora_p2p_transport_incoming_t *meta, struct ring_buf *output) {
 	struct lora_p2p_transport_data_t *data = dev->data;
 
-    // sanity check: all required parameters were set beforehand
-    if (data->network_dev == NULL) return -EINVAL;
+    uint8_t header, *packet;
+    uint32_t available_size;
+    struct lora_p2p_network_incoming_t nmeta;
+    int retcode;
 
-    // sanity check: supplied buffer length MUST be at least big enough to hold the header
-    if (length < LORA_P2P_NETWORK_DIRECT_HEADER_LENGTH) return -EINVAL;
+    LOG_DBG("Ready to receive %d bytes at most", ring_buf_space_get(output));
 
-    LOG_DBG("Ready to receive %d bytes at most", length);
-
-    // keep trying to recv until we get something for us
+    // receive packets while we should
     while (true) {
-        // do the receiving
-        int recv_len = data->recv(data->buffer, LBM_BUFFER_SIZE, &meta->rssi, &meta->snr, data->user_data);
+        /* Receive packet
+        */
+        // reset ring buffer (we want to point at the start of the memory block)
+        ring_buf_reset(&data->rb);
 
-        // error ? return it here
-        if (recv_len < 0) return recv_len;
-
-        // is it for us ?
-        if (data->my_id != data->buffer[1] && data->buffer[1] != LORA_P2P_BROADCAST_ID) continue;
-
-        // sanity check that we have enough space in supplied buffer
-        if (length < (recv_len - LORA_P2P_NETWORK_DIRECT_HEADER_LENGTH)) return -EINVAL;
+        // receive a packet (wait indefinetly)
+        retcode = lora_p2p_network_recv(data->lora_network_dev, &nmeta, &data->rb, K_FOREVER);
+        if (retcode < 0) return retcode;
 
         // update meta data
-        meta->from = data->buffer[0];
-        meta->to = data->buffer[1];
+        meta->from = nmeta.from;
+        meta->to = nmeta.to;
+        meta->rssi = nmeta.rssi;
+        meta->snr = nmeta.snr;
 
-        // copy payload
-        memcpy(buffer, &data->buffer[2], recv_len - LORA_P2P_NETWORK_DIRECT_HEADER_LENGTH);
+        // claim contents
+        available_size = ring_buf_get_claim(&data->rb, &packet, lora_p2p_network_get_mtu(data->lora_network_dev));
 
-        LOG_DBG("Received %d bytes from %d", recv_len - LORA_P2P_NETWORK_DIRECT_HEADER_LENGTH, meta->from);
+        // we MUST have a header
+        if (available_size < 1) return -EINVAL;
 
-        // return how many bytes we put in the buffer
-        return recv_len - LORA_P2P_NETWORK_DIRECT_HEADER_LENGTH;
+        // parse header
+        header = packet[available_size-1];
+
+        // put contents in caller ring buff
+        ring_buf_put(output, packet, available_size-1);
+
+        // finish claim
+        ring_buf_get_finish(&data->rb, available_size);
+
+        /* Make it reliable if requested
+        */
+        if (header & LBM_TRANSPORT_HEADER_FLAG_RELIABLE) {
+            // give recipient grace time of one millisecond to sort things out before we send Ack
+            k_sleep(K_MSEC(1));
+
+            // prepare Ack packet
+            prepare_ack(&data->rb);
+
+            // send Ack
+            retcode = lora_p2p_network_send(data->lora_network_dev, nmeta.from, &data->rb);
+            if (retcode < 0) return retcode;
+        }
+
+        /* Aftermath
+        */
+        // decide what we do now (we are done if this was a stand alone packet or a finisher)
+        if ((header & LBM_TRANSPORT_HEADER_TYPE_MASK) == LBM_TRANSPORT_HEADER_TYPE_STAND_ALONE ||
+            (header & LBM_TRANSPORT_HEADER_TYPE_MASK) == LBM_TRANSPORT_HEADER_TYPE_FINISHER
+            ) break;
     }
+
+    LOG_DBG("  Got payload (%d bytes)", ring_buf_size_get(output));
+
+    return 0;
 }
 
 /* Driver & Device definition
@@ -196,4 +280,4 @@ static DEVICE_API(lora_p2p_transport, lora_p2p_transport_api) = {
 
 DEVICE_DEFINE(lora_p2p_transport, LORA_P2P_TRANSPORT_DRIVER_NAME, lora_p2p_transport_init,
     NULL, &data, NULL, POST_KERNEL,
-    CONFIG_KERNEL_INIT_PRIORITY_DEVICE, &lora_p2p_transport_api);
+    LBM_P2P_TRANSPORT_INIT_PRIORITY, &lora_p2p_transport_api);

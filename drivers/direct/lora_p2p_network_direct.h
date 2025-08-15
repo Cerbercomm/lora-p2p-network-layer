@@ -14,8 +14,6 @@
 extern "C" {
 #endif
 
-#define LORA_P2P_NETWORK_DIRECT_DRIVER_NAME "lora_p2p_network_direct"
-
 #ifdef __cplusplus
 }
 #endif

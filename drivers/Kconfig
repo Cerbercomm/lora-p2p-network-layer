@@ -42,4 +42,18 @@ config LBM_P2P_TRANSPORT_LAYER
         help
           Lora P2P transport network layer implementation.
 
+config LBM_P2P_NETWORK_INIT_PRIORITY
+        int "LoRa P2P network initialization priority"
+        default 91
+        help
+          System initialization priority for LoRa P2P network drivers.
+          Needs to be higher than LORA_BASICS_MODEM_INIT_PRIORITY
+
+config LBM_P2P_TRANSPORT_INIT_PRIORITY
+        int "LoRa P2P network initialization priority"
+        default 92
+        help
+          System initialization priority for LoRa P2P network drivers.
+          Needs to be higher than LBM_P2P_NETWORK_INIT_PRIORITY
+          
 endif # LBM_P2P_NETWORK

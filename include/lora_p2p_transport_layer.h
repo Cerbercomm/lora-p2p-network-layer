@@ -26,6 +26,8 @@ extern "C" {
  * -----------------------------------------------------------------------------
  * --- PUBLIC TYPES ------------------------------------------------------------
 */
+#define LORA_P2P_TRANSPORT_DRIVER_NAME "lora_p2p_transport"
+
 struct lora_p2p_transport_incoming_t {
 	// who is it coming from ?
 	uint8_t from;
@@ -45,7 +47,7 @@ struct lora_p2p_transport_incoming_t {
  *
  * For internal driver use only, skip these in public documentation.
 */
-typedef struct device * (*lora_p2p_transport_api_get_network_device)(const struct device *dev);
+typedef const struct device * (*lora_p2p_transport_api_get_network_device)(const struct device *dev);
 typedef int (*lora_p2p_transport_api_send)(const struct device *dev, uint8_t to, struct ring_buf *rb, bool reliable);
 typedef int (*lora_p2p_transport_api_recv)(const struct device *dev, struct lora_p2p_transport_incoming_t *meta, struct ring_buf *rb);
 
@@ -61,7 +63,7 @@ __subsystem struct lora_p2p_transport_driver_api {
  * -----------------------------------------------------------------------------
  * --- PUBLIC DRIVER API -------------------------------------------------------
 */
-static inline struct device * lora_p2p_transport_get_network_device(const struct device *dev) {
+static inline const struct device * lora_p2p_transport_get_network_device(const struct device *dev) {
 	return DEVICE_API_GET(lora_p2p_transport, dev)->get_network_device(dev);
 }
 
